@@ -2,7 +2,7 @@
  * @Author: Lieyan
  * @Date: 2024-02-06 02:00:46
  * @LastEditors: Lieyan
- * @LastEditTime: 2024-02-07 11:35:25
+ * @LastEditTime: 2024-02-07 11:37:31
  * @FilePath: /FireProxy/modules/tcpProxy.js
  * @Description:
  * @Contact: QQ: 2102177341  Website: lieyan.space  Github: @lieyan666
@@ -35,7 +35,6 @@ function startTCPServer(localHost, localPort, targetHost, targetPort) {
   });
   tcpServer.on('error', (error) => {
     console.error(`[TCP] Server error: ${error.message}`);
-    // 可以在这里进行适当的错误处理，比如重启服务器
   });
   tcpServer.listen(localPort, localHost, () => {
     console.log(`[TCP] Listening => ${localHost}:${localPort}`);
