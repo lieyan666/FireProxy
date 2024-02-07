@@ -2,7 +2,7 @@
  * @Author: Lieyan
  * @Date: 2024-02-06 02:00:46
  * @LastEditors: Lieyan
- * @LastEditTime: 2024-02-07 11:37:31
+ * @LastEditTime: 2024-02-07 22:49:36
  * @FilePath: /FireProxy/modules/tcpProxy.js
  * @Description:
  * @Contact: QQ: 2102177341  Website: lieyan.space  Github: @lieyan666
@@ -29,15 +29,18 @@ function startTCPServer(localHost, localPort, targetHost, targetPort) {
         `[TCP] Target server closed connection from ${targetHost}:${targetPort}`,
       );
     });
+    tcpLocalSocket.on('error', (error) => {
+      console.error(`[TCP] Error in connection by ${tcpLocalSocket.remoteAddress}:${tcpLocalSocket.remotePort}: ${error.message}`);
+    });
     tcpTargetSocket.on('error', (error) => {
       console.error(`[TCP] Error in connection to ${targetHost}:${targetPort}: ${error.message}`);
     });
   });
-  tcpServer.on('error', (error) => {
-    console.error(`[TCP] Server error: ${error.message}`);
-  });
   tcpServer.listen(localPort, localHost, () => {
     console.log(`[TCP] Listening => ${localHost}:${localPort}`);
+  });
+  tcpServer.on('error', (error) => {
+    console.error(`[TCP] Server error: ${error.message}`);
   });
 }
 

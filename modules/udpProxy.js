@@ -2,7 +2,7 @@
  * @Author: Lieyan
  * @Date: 2024-02-06 02:08:34
  * @LastEditors: Lieyan
- * @LastEditTime: 2024-02-06 02:53:45
+ * @LastEditTime: 2024-02-07 22:51:04
  * @FilePath: /FireProxy/modules/udpProxy.js
  * @Description:
  * @Contact: QQ: 2102177341  Website: lieyan.space  Github: @lieyan666
@@ -54,14 +54,14 @@ function startUDPServer(
   // when the server gets a message
   server.on("message", function (message, sender) {
     console.log(
-      `[UDP] Message from ${sender.address}:${sender.port} {${message}}`,
+      `[UDP] Message from ${sender.address}:${sender.port} {{message}}`, // Don't show message
     );
   });
 
   // when the bound socket gets a message and it's send back to the peer the socket was bound to
   server.on("proxyMsg", function (message, sender, peer) {
     console.log(
-      `[UDP] Answer from ${sender.address}:${sender.port} - ${peer.address}:${peer.port} {${message}}`,
+      `[UDP] Answer from ${sender.address}:${sender.port} - ${peer.address}:${peer.port} {{message}}`, // Don't show message
     );
   });
 
