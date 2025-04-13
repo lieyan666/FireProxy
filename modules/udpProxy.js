@@ -1,13 +1,15 @@
-/*
+e/*
  * @Author: Lieyan
  * @Date: 2024-02-06 02:08:34
  * @LastEditors: Lieyan
- * @LastEditTime: 2024-02-07 22:51:04
+ * @LastEditTime: 2025-04-06 14:05:50
  * @FilePath: /FireProxy/modules/udpProxy.js
  * @Description:
  * @Contact: QQ: 2102177341  Website: lieyan.space  Github: @lieyan666
  * @Copyright: Copyright (c) 2024 by lieyanDevTeam, All Rights Reserved.
  */
+const proxy = require("udp-proxy");
+
 function startUDPServer(
   localHost,
   localPort,
@@ -16,8 +18,7 @@ function startUDPServer(
   isIPv6 = false,
   isLocalIPv6 = false,
 ) {
-  const proxy = require("udp-proxy"),
-    options = {
+  const options = {
       address: targetHost,
       port: targetPort,
       ipv6: isIPv6,
@@ -51,21 +52,21 @@ function startUDPServer(
     );
   });
 
-  // when the server gets a message
-  server.on("message", function (message, sender) {
-    console.log(
-      `[UDP] Message from ${sender.address}:${sender.port} {{message}}`, // Don't show message
-    );
-  });
+  // // when the server gets a message (Commented out for performance)
+  // server.on("message", function (message, sender) {
+  //   console.log(
+  //     `[UDP] Message from ${sender.address}:${sender.port} {{message}}`, // Don't show message
+  //   );
+  // });
 
-  // when the bound socket gets a message and it's send back to the peer the socket was bound to
-  server.on("proxyMsg", function (message, sender, peer) {
-    console.log(
-      `[UDP] Answer from ${sender.address}:${sender.port} - ${peer.address}:${peer.port} {{message}}`, // Don't show message
-    );
-  });
+  // // when the bound socket gets a message and it's send back to the peer the socket was bound to (Commented out for performance)
+  // server.on("proxyMsg", function (message, sender, peer) {
+  //   console.log(
+  //     `[UDP] Answer from ${sender.address}:${sender.port} - ${peer.address}:${peer.port} {{message}}`, // Don't show message
+  //   );
+  // });
 
-  // 'when the socket closes (from a timeout) without new messages
+  // when the socket closes (from a timeout) without new messages
   server.on("proxyClose", function (peer) {
     console.log(`[UDP] Disconnecting socket from ${peer.address}`);
   });
