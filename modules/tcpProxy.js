@@ -2,7 +2,7 @@
  * @Author: Lieyan
  * @Date: 2024-02-06 02:00:46
  * @LastEditors: Lieyan
- * @LastEditTime: 2025-04-06 14:03:16
+ * @LastEditTime: 2025-04-06 14:12:34
  * @FilePath: /FireProxy/modules/tcpProxy.js
  * @Description:
  * @Contact: QQ: 2102177341  Website: lieyan.space  Github: @lieyan666
@@ -82,63 +82,154 @@ class ConnectionPool extends EventEmitter {
   }
 }
 
-function startTCPServer(localHost, localPort, targetHost, targetPort) {
-  const pool = new ConnectionPool(targetHost, targetPort);
-  const bufferSize = 64 * 1024; // 64KB buffer
+// Updated function to accept the whole rule object
+function startTCPServer(rule) {
+  const { localHost, targetHost, name } = rule;
+  const ruleIdentifier = name ? `${name} (ID: ${rule.id})` : `Rule ID: ${rule.id}`;
 
-  const tcpServer = net.createServer(async (tcpLocalSocket) => {
-    try {
-      const tcpTargetSocket = await pool.getConnection();
-      
-      tcpLocalSocket.on('close', () => {
-        pool.releaseConnection(tcpTargetSocket);
-        console.log(
-          `[TCP] Disconnecting socks from ${tcpLocalSocket.remoteAddress}:${tcpLocalSocket.remotePort}`
-        );
-      });
+  // --- Port Range Logic ---
+  if (rule.localPortRange && rule.targetPortRange) {
+    const [localStart, localEnd] = rule.localPortRange;
+    const [targetStart, targetEnd] = rule.targetPortRange;
 
-      tcpTargetSocket.on('close', () => {
-        // Optional: Log target closure if needed, but often less critical than local closure
-        // console.log(`[TCP] Target closed connection for ${tcpLocalSocket.remoteAddress}:${tcpLocalSocket.remotePort}`);
-        tcpLocalSocket.destroy(); // Ensure local socket is closed if target closes
-      });
-
-      tcpLocalSocket.on('error', (error) => {
-        console.error(`[TCP] Local socket error (${tcpLocalSocket.remoteAddress}:${tcpLocalSocket.remotePort}): ${error.message}`);
-        pool.releaseConnection(tcpTargetSocket); // Release target connection
-        tcpTargetSocket.destroy(); // Destroy target socket
-      });
-
-      tcpTargetSocket.on('error', (error) => {
-        console.error(`[TCP] Target socket error (${targetHost}:${targetPort}): ${error.message}`);
-        pool.releaseConnection(tcpTargetSocket); // Ensure connection is marked for removal/release
-        tcpLocalSocket.destroy(); // Destroy local socket
-      });
-
-      // Rely on default Node.js buffer handling - removed explicit set*HighWaterMark
-
-      console.log(
-        `[TCP] Proxying ${tcpLocalSocket.remoteAddress}:${tcpLocalSocket.remotePort} <=> ${targetHost}:${targetPort} ` +
-        `(Pool: ${pool.stats.activeConnections}/${pool.stats.totalConnections})`
-      );
-
-      tcpLocalSocket.pipe(tcpTargetSocket);
-      tcpTargetSocket.pipe(tcpLocalSocket);
-    } catch (err) {
-      console.error(`[TCP] Failed to establish connection: ${err.message}`);
-      tcpLocalSocket.destroy();
+    // Basic validation
+    if (!Array.isArray(rule.localPortRange) || rule.localPortRange.length !== 2 ||
+        !Array.isArray(rule.targetPortRange) || rule.targetPortRange.length !== 2 ||
+        localStart > localEnd || targetStart > targetEnd ||
+        (localEnd - localStart) !== (targetEnd - targetStart)) {
+      console.error(`[TCP] Invalid port range configuration for ${ruleIdentifier}. Check ranges.`);
+      return []; // Return empty array indicating failure for this rule
     }
-  });
-  tcpServer.listen(localPort, localHost, () => {
-    console.log(`[TCP] Listening => ${localHost}:${localPort}`);
-    console.log(`[TCP] Connection pool size: ${pool.poolSize}`);
-  });
 
-  tcpServer.on('error', (error) => {
-    console.error(`[TCP] Server error: ${error.message}`);
-  });
+    const servers = [];
+    const pools = {}; // Map to hold connection pools, keyed by targetPort
 
-  // Removed periodic pool stats logging interval
+    console.log(`[TCP] Setting up port range for ${ruleIdentifier}: Local ${localStart}-${localEnd} -> Target ${targetStart}-${targetEnd}`);
+
+    for (let i = 0; i <= localEnd - localStart; i++) {
+      const currentLocalPort = localStart + i;
+      const currentTargetPort = targetStart + i;
+
+      // Create a pool for the specific target port if it doesn't exist
+      if (!pools[currentTargetPort]) {
+        pools[currentTargetPort] = new ConnectionPool(targetHost, currentTargetPort);
+        console.log(`[TCP] Initialized connection pool for ${targetHost}:${currentTargetPort} (Rule: ${ruleIdentifier})`);
+      }
+      const pool = pools[currentTargetPort];
+
+      const tcpServer = net.createServer(async (tcpLocalSocket) => {
+        try {
+          const tcpTargetSocket = await pool.getConnection();
+
+          tcpLocalSocket.on('close', () => {
+            pool.releaseConnection(tcpTargetSocket);
+            console.log(
+              `[TCP] [${ruleIdentifier}] Disconnecting socks from ${tcpLocalSocket.remoteAddress}:${tcpLocalSocket.remotePort} (Local: ${currentLocalPort})`
+            );
+          });
+
+          tcpTargetSocket.on('close', () => {
+            tcpLocalSocket.destroy();
+          });
+
+          tcpLocalSocket.on('error', (error) => {
+            console.error(`[TCP] [${ruleIdentifier}] Local socket error (${tcpLocalSocket.remoteAddress}:${tcpLocalSocket.remotePort} on ${currentLocalPort}): ${error.message}`);
+            pool.releaseConnection(tcpTargetSocket);
+            tcpTargetSocket.destroy();
+          });
+
+          tcpTargetSocket.on('error', (error) => {
+            console.error(`[TCP] [${ruleIdentifier}] Target socket error (${targetHost}:${currentTargetPort}): ${error.message}`);
+            pool.releaseConnection(tcpTargetSocket);
+            tcpLocalSocket.destroy();
+          });
+
+          console.log(
+            `[TCP] [${ruleIdentifier}] Proxying ${tcpLocalSocket.remoteAddress}:${tcpLocalSocket.remotePort} via ${localHost}:${currentLocalPort} <=> ${targetHost}:${currentTargetPort} ` +
+            `(Pool: ${pool.stats.activeConnections}/${pool.stats.totalConnections})`
+          );
+
+          tcpLocalSocket.pipe(tcpTargetSocket);
+          tcpTargetSocket.pipe(tcpLocalSocket);
+        } catch (err) {
+          console.error(`[TCP] [${ruleIdentifier}] Failed to establish connection for ${localHost}:${currentLocalPort} -> ${targetHost}:${currentTargetPort}: ${err.message}`);
+          tcpLocalSocket.destroy();
+        }
+      });
+
+      tcpServer.listen(currentLocalPort, localHost, () => {
+        console.log(`[TCP] [${ruleIdentifier}] Listening => ${localHost}:${currentLocalPort} -> ${targetHost}:${currentTargetPort}`);
+        // console.log(`[TCP] Connection pool size for ${currentTargetPort}: ${pool.poolSize}`); // Log pool size if needed
+      });
+
+      tcpServer.on('error', (error) => {
+        console.error(`[TCP] [${ruleIdentifier}] Server error on ${localHost}:${currentLocalPort}: ${error.message}`);
+      });
+
+      servers.push(tcpServer);
+    }
+    return servers; // Return array of created server instances
+
+  // --- Single Port Logic (Legacy/Default) ---
+  } else if (rule.localPort && rule.targetPort) {
+    const { localPort, targetPort } = rule;
+    const pool = new ConnectionPool(targetHost, targetPort);
+    // const bufferSize = 64 * 1024; // Buffer size not explicitly used anymore
+
+    const tcpServer = net.createServer(async (tcpLocalSocket) => {
+      try {
+        const tcpTargetSocket = await pool.getConnection();
+
+        tcpLocalSocket.on('close', () => {
+          pool.releaseConnection(tcpTargetSocket);
+          console.log(
+            `[TCP] [${ruleIdentifier}] Disconnecting socks from ${tcpLocalSocket.remoteAddress}:${tcpLocalSocket.remotePort} (Local: ${localPort})`
+          );
+        });
+
+        tcpTargetSocket.on('close', () => {
+          tcpLocalSocket.destroy();
+        });
+
+        tcpLocalSocket.on('error', (error) => {
+          console.error(`[TCP] [${ruleIdentifier}] Local socket error (${tcpLocalSocket.remoteAddress}:${tcpLocalSocket.remotePort} on ${localPort}): ${error.message}`);
+          pool.releaseConnection(tcpTargetSocket);
+          tcpTargetSocket.destroy();
+        });
+
+        tcpTargetSocket.on('error', (error) => {
+          console.error(`[TCP] [${ruleIdentifier}] Target socket error (${targetHost}:${targetPort}): ${error.message}`);
+          pool.releaseConnection(tcpTargetSocket);
+          tcpLocalSocket.destroy();
+        });
+
+        console.log(
+          `[TCP] [${ruleIdentifier}] Proxying ${tcpLocalSocket.remoteAddress}:${tcpLocalSocket.remotePort} via ${localHost}:${localPort} <=> ${targetHost}:${targetPort} ` +
+          `(Pool: ${pool.stats.activeConnections}/${pool.stats.totalConnections})`
+        );
+
+        tcpLocalSocket.pipe(tcpTargetSocket);
+        tcpTargetSocket.pipe(tcpLocalSocket);
+      } catch (err) {
+        console.error(`[TCP] [${ruleIdentifier}] Failed to establish connection for ${localHost}:${localPort} -> ${targetHost}:${targetPort}: ${err.message}`);
+        tcpLocalSocket.destroy();
+      }
+    });
+
+    tcpServer.listen(localPort, localHost, () => {
+      console.log(`[TCP] [${ruleIdentifier}] Listening => ${localHost}:${localPort} -> ${targetHost}:${targetPort}`);
+      console.log(`[TCP] [${ruleIdentifier}] Connection pool size: ${pool.poolSize}`);
+    });
+
+    tcpServer.on('error', (error) => {
+      console.error(`[TCP] [${ruleIdentifier}] Server error on ${localHost}:${localPort}: ${error.message}`);
+    });
+
+    return [tcpServer]; // Return array containing the single server instance for consistency
+  } else {
+    console.error(`[TCP] Invalid configuration for ${ruleIdentifier}. Missing localPort/targetPort or localPortRange/targetPortRange.`);
+    return []; // Return empty array for invalid config
+  }
 }
 
 module.exports = { startTCPServer };
