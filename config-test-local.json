@@ -1,0 +1,22 @@
+{
+  "forward": [
+    {
+      "id": "localTCP",
+      "type": "tcp",
+      "status": "active",
+      "localHost": "0.0.0.0",
+      "localPort": 29171,
+      "targetHost": "127.0.0.1",
+      "targetPort": 8001
+    },
+    {
+      "id": "localUDP",
+      "type": "udp",
+      "status": "active",
+      "localHost": "0.0.0.0",
+      "localPort": 29172,
+      "targetHost": "127.0.0.1",
+      "targetPort": 8002
+    }
+  ]
+}

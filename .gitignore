@@ -132,3 +132,7 @@ dist
 .yarn/build-state.yml
 .yarn/install-state.gz
 .pnp.*
+
+# Test results and reports
+test-results/
+performance-report-*.json
