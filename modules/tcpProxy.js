@@ -12,13 +12,42 @@ const net = require("net");
 const { EventEmitter } = require('events');
 
 class ConnectionPool extends EventEmitter {
-  constructor(targetHost, targetPort, poolSize = 10) {
+  constructor(targetHost, targetPort, poolSize = 20) {
     super();
     this.pool = [];
     this.targetHost = targetHost;
     this.targetPort = targetPort;
     this.poolSize = poolSize;
-    this.stats = { totalConnections: 0, activeConnections: 0 };
+    this.stats = { totalConnections: 0, activeConnections: 0, errors: 0, reconnects: 0 };
+    this.highWaterMark = 64 * 1024; // 64KB buffer
+    this.connectTimeout = 5000; // 5s connection timeout
+    this.keepAliveInterval = 30000; // 30s keep-alive
+    this.idleTimeout = 300000; // 5min idle timeout
+    this.lastActivity = new Map();
+    
+    // Start idle connection cleanup
+    this.cleanupInterval = setInterval(() => this.cleanupIdleConnections(), 60000);
+  }
+
+  cleanupIdleConnections() {
+    const now = Date.now();
+    const toRemove = [];
+    
+    for (let i = 0; i < this.pool.length; i++) {
+      const conn = this.pool[i];
+      const lastActivity = this.lastActivity.get(conn.socket) || now;
+      
+      if (conn.idle && now - lastActivity > this.idleTimeout) {
+        toRemove.push(i);
+        conn.socket.destroy();
+        this.lastActivity.delete(conn.socket);
+      }
+    }
+    
+    // Remove from pool in reverse order to maintain indices
+    for (let i = toRemove.length - 1; i >= 0; i--) {
+      this.pool.splice(toRemove[i], 1);
+    }
   }
 
   async getConnection() {
@@ -27,6 +56,7 @@ class ConnectionPool extends EventEmitter {
       if (conn.idle) {
         conn.idle = false;
         this.stats.activeConnections++;
+        this.lastActivity.set(conn.socket, Date.now());
         return conn.socket;
       }
     }
@@ -34,24 +64,44 @@ class ConnectionPool extends EventEmitter {
     // Create new connection if pool not full
     if (this.pool.length < this.poolSize) {
       return new Promise((resolve, reject) => {
-        const socket = net.createConnection(this.targetPort, this.targetHost, () => {
-          socket.setKeepAlive(true, 60000);
+        const socket = net.createConnection({
+          port: this.targetPort,
+          host: this.targetHost,
+          timeout: this.connectTimeout,
+          highWaterMark: this.highWaterMark
+        });
+
+        const timeoutHandler = setTimeout(() => {
+          socket.destroy();
+          this.stats.errors++;
+          reject(new Error(`Connection timeout to ${this.targetHost}:${this.targetPort}`));
+        }, this.connectTimeout);
+
+        socket.on('connect', () => {
+          clearTimeout(timeoutHandler);
+          socket.setKeepAlive(true, this.keepAliveInterval);
           socket.setNoDelay(true);
+          socket.setTimeout(0);
           
           const conn = { socket, idle: false };
           this.pool.push(conn);
           this.stats.totalConnections++;
           this.stats.activeConnections++;
+          this.lastActivity.set(socket, Date.now());
           
           socket.on('close', () => {
             this.pool = this.pool.filter(c => c.socket !== socket);
             this.stats.activeConnections--;
+            this.lastActivity.delete(socket);
             this.emit('connectionClosed');
           });
           
           socket.on('error', (err) => {
+            clearTimeout(timeoutHandler);
             this.pool = this.pool.filter(c => c.socket !== socket);
             this.stats.activeConnections--;
+            this.stats.errors++;
+            this.lastActivity.delete(socket);
             this.emit('connectionError', err);
           });
 
@@ -59,17 +109,24 @@ class ConnectionPool extends EventEmitter {
         });
 
         socket.on('error', (err) => {
-          console.error(`[TCP Pool] Error creating connection to ${this.targetHost}:${this.targetPort}: ${err.message}`);
-          // No need to filter pool here as it wasn't added yet on error during creation
-          reject(err); // Reject the promise on connection error
+          clearTimeout(timeoutHandler);
+          this.stats.errors++;
+          reject(err);
         });
       });
     }
 
     // Wait for next available connection if pool is full
     return new Promise(resolve => {
-      this.once('connectionClosed', () => resolve(this.getConnection()));
-      this.once('connectionError', () => resolve(this.getConnection()));
+      const onAvailable = () => {
+        this.getConnection().then(resolve).catch(() => {
+          // Retry on error
+          setTimeout(() => this.getConnection().then(resolve), 100);
+        });
+      };
+      
+      this.once('connectionClosed', onAvailable);
+      this.once('connectionError', onAvailable);
     });
   }
 
@@ -78,7 +135,27 @@ class ConnectionPool extends EventEmitter {
     if (conn) {
       conn.idle = true;
       this.stats.activeConnections--;
+      this.lastActivity.set(socket, Date.now());
     }
+  }
+  
+  destroy() {
+    if (this.cleanupInterval) {
+      clearInterval(this.cleanupInterval);
+    }
+    for (const conn of this.pool) {
+      conn.socket.destroy();
+      this.lastActivity.delete(conn.socket);
+    }
+    this.pool = [];
+  }
+  
+  getStats() {
+    return {
+      ...this.stats,
+      poolSize: this.pool.length,
+      idleConnections: this.pool.filter(c => c.idle).length
+    };
   }
 }
 
@@ -117,8 +194,15 @@ function startTCPServer(rule) {
       }
       const pool = pools[currentTargetPort];
 
-      const tcpServer = net.createServer(async (tcpLocalSocket) => {
+      const tcpServer = net.createServer({
+        highWaterMark: 64 * 1024,
+        allowHalfOpen: false
+      }, async (tcpLocalSocket) => {
         try {
+          tcpLocalSocket.setKeepAlive(true, 30000);
+          tcpLocalSocket.setNoDelay(true);
+          tcpLocalSocket.setTimeout(0);
+          
           const tcpTargetSocket = await pool.getConnection();
 
           tcpLocalSocket.on('close', () => {
@@ -149,8 +233,17 @@ function startTCPServer(rule) {
             `(Pool: ${pool.stats.activeConnections}/${pool.stats.totalConnections})`
           );
 
-          tcpLocalSocket.pipe(tcpTargetSocket);
-          tcpTargetSocket.pipe(tcpLocalSocket);
+          const localToPipe = tcpLocalSocket.pipe(tcpTargetSocket, { end: false });
+          const targetToPipe = tcpTargetSocket.pipe(tcpLocalSocket, { end: false });
+          
+          localToPipe.on('error', () => {
+            pool.releaseConnection(tcpTargetSocket);
+            tcpTargetSocket.destroy();
+          });
+          
+          targetToPipe.on('error', () => {
+            tcpLocalSocket.destroy();
+          });
         } catch (err) {
           console.error(`[TCP] [${ruleIdentifier}] Failed to establish connection for ${localHost}:${currentLocalPort} -> ${targetHost}:${currentTargetPort}: ${err.message}`);
           tcpLocalSocket.destroy();
@@ -176,8 +269,15 @@ function startTCPServer(rule) {
     const pool = new ConnectionPool(targetHost, targetPort);
     // const bufferSize = 64 * 1024; // Buffer size not explicitly used anymore
 
-    const tcpServer = net.createServer(async (tcpLocalSocket) => {
+    const tcpServer = net.createServer({
+      highWaterMark: 64 * 1024,
+      allowHalfOpen: false
+    }, async (tcpLocalSocket) => {
       try {
+        tcpLocalSocket.setKeepAlive(true, 30000);
+        tcpLocalSocket.setNoDelay(true);
+        tcpLocalSocket.setTimeout(0);
+        
         const tcpTargetSocket = await pool.getConnection();
 
         tcpLocalSocket.on('close', () => {
@@ -208,8 +308,17 @@ function startTCPServer(rule) {
           `(Pool: ${pool.stats.activeConnections}/${pool.stats.totalConnections})`
         );
 
-        tcpLocalSocket.pipe(tcpTargetSocket);
-        tcpTargetSocket.pipe(tcpLocalSocket);
+        const localToPipe = tcpLocalSocket.pipe(tcpTargetSocket, { end: false });
+        const targetToPipe = tcpTargetSocket.pipe(tcpLocalSocket, { end: false });
+        
+        localToPipe.on('error', () => {
+          pool.releaseConnection(tcpTargetSocket);
+          tcpTargetSocket.destroy();
+        });
+        
+        targetToPipe.on('error', () => {
+          tcpLocalSocket.destroy();
+        });
       } catch (err) {
         console.error(`[TCP] [${ruleIdentifier}] Failed to establish connection for ${localHost}:${localPort} -> ${targetHost}:${targetPort}: ${err.message}`);
         tcpLocalSocket.destroy();

@@ -10,8 +10,5 @@
   },
   "author": "lieyan",
   "license": "MIT",
-  "dependencies": {
-    "net": "^1.0.2",
-    "udp-proxy": "^1.2.0"
-  }
+  "dependencies": {}
 }

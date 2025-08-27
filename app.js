@@ -11,6 +11,7 @@
 const fs = require("fs");
 const { startTCPServer } = require("./modules/tcpProxy.js");
 const { startUDPServer } = require("./modules/udpProxy.js");
+const { monitor } = require("./modules/performanceMonitor.js");
 
 let config;
 const configPath = "config.json";
@@ -32,19 +33,28 @@ try {
   process.exit(1); // Exit on config error
 }
 
+// Start performance monitoring
+monitor.start();
+console.log(`[INFO] Performance monitoring enabled. Summary reports every 5 minutes.`);
 
 // Iterate through rules and start servers
-config.forward.forEach(rule => {
+config.forward.forEach((rule, index) => {
     // Use 'rule' instead of 'server' for clarity
     if (rule.status === "active") {
         const ruleIdentifier = rule.name ? `${rule.name} (ID: ${rule.id})` : `Rule ID: ${rule.id}`;
         console.log(`[INFO] Initializing active rule: ${ruleIdentifier}`);
         if (rule.type === "tcp") {
             // Pass the entire rule object
-            startTCPServer(rule);
+            const servers = startTCPServer(rule);
+            servers.forEach((server, serverIndex) => {
+                monitor.registerProxy(`tcp_${rule.id}_${serverIndex}`, server);
+            });
         } else if (rule.type === "udp") {
             // Pass the entire rule object
-            startUDPServer(rule);
+            const servers = startUDPServer(rule);
+            servers.forEach((server, serverIndex) => {
+                monitor.registerProxy(`udp_${rule.id}_${serverIndex}`, server);
+            });
         } else {
             console.error(`[ERROR] Invalid server type "${rule.type}" for rule ${ruleIdentifier}. Skipping.`);
         }
@@ -54,4 +64,17 @@ config.forward.forEach(rule => {
     } else {
         console.warn("[WARN] Skipping entry in config: Missing ID or invalid format.");
     }
+});
+
+// Graceful shutdown handling
+process.on('SIGINT', () => {
+    console.log('\n[INFO] Received SIGINT. Shutting down gracefully...');
+    monitor.stop();
+    process.exit(0);
+});
+
+process.on('SIGTERM', () => {
+    console.log('\n[INFO] Received SIGTERM. Shutting down gracefully...');
+    monitor.stop();
+    process.exit(0);
 });
