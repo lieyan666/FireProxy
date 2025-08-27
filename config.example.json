@@ -1,4 +1,18 @@
 {
+  "api": {
+    "enabled": true,
+    "host": "127.0.0.1",
+    "port": 8080,
+    "enableCors": true
+  },
+  "logging": {
+    "level": "info",
+    "enableFile": true,
+    "enableConsole": true,
+    "logDir": "./logs",
+    "maxFileSize": 10485760,
+    "maxFiles": 5
+  },
   "forward": [
     {
       "id": 1,

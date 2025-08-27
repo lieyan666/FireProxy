@@ -12,69 +12,177 @@ const fs = require("fs");
 const { startTCPServer } = require("./modules/tcpProxy.js");
 const { startUDPServer } = require("./modules/udpProxy.js");
 const { monitor } = require("./modules/performanceMonitor.js");
+const { logger } = require("./modules/logger.js");
+const { APIServer } = require("./modules/apiServer.js");
 
 let config;
+let apiServer;
 const configPath = "config.json";
 
 // Read and parse config with error handling
 try {
   if (!fs.existsSync(configPath)) {
-    console.error(`Error: Configuration file "${configPath}" not found.`);
-    console.log(`Please create "${configPath}" based on "config.example.json".`);
-    process.exit(1); // Exit if config file is missing
+    logger.error('Configuration file not found', {
+      configPath,
+      suggestion: 'Create config.json based on config.example.json'
+    });
+    process.exit(1);
   }
   const configFileContent = fs.readFileSync(configPath);
   config = JSON.parse(configFileContent);
   if (!config || !Array.isArray(config.forward)) {
     throw new Error("Invalid config format. 'forward' array not found.");
   }
+  logger.info('Configuration loaded successfully', {
+    rulesCount: config.forward.length,
+    configPath,
+    apiEnabled: config.api?.enabled !== false,
+    loggingLevel: config.logging?.level || 'info'
+  });
 } catch (error) {
-  console.error(`Error reading or parsing ${configPath}: ${error.message}`);
-  process.exit(1); // Exit on config error
+  logger.error('Configuration error', {
+    error: error.message,
+    configPath
+  });
+  process.exit(1);
+}
+
+// Initialize logger with config
+if (config.logging) {
+  if (config.logging.level) {
+    logger.setLevel(config.logging.level);
+  }
+  if (config.logging.enableFile !== undefined) {
+    logger.enableFile = config.logging.enableFile;
+  }
+  if (config.logging.enableConsole !== undefined) {
+    logger.enableConsole = config.logging.enableConsole;
+  }
+  if (config.logging.logDir) {
+    logger.logDir = config.logging.logDir;
+  }
+  if (config.logging.maxFileSize) {
+    logger.maxFileSize = config.logging.maxFileSize;
+  }
+  if (config.logging.maxFiles) {
+    logger.maxFiles = config.logging.maxFiles;
+  }
+  logger.ensureLogDirectory();
 }
 
 // Start performance monitoring
 monitor.start();
-console.log(`[INFO] Performance monitoring enabled. Summary reports every 5 minutes.`);
+logger.info('Performance monitoring enabled', {
+  reportInterval: '5 minutes'
+});
+
+// Start API server if enabled
+if (config.api?.enabled !== false) {
+  const apiConfig = config.api || {};
+  apiServer = new APIServer({
+    port: apiConfig.port || process.env.API_PORT || 8080,
+    host: apiConfig.host || process.env.API_HOST || '127.0.0.1',
+    enableCors: apiConfig.enableCors !== false
+  });
+
+  apiServer.setPerformanceMonitor(monitor);
+
+  apiServer.start().then(() => {
+    logger.info('API server started successfully', {
+      port: apiServer.port,
+      host: apiServer.host,
+      enabled: true
+    });
+  }).catch((error) => {
+    logger.error('Failed to start API server', { error: error.message });
+  });
+} else {
+  logger.info('API server disabled in configuration');
+  apiServer = null;
+}
 
 // Iterate through rules and start servers
+logger.info('Starting proxy servers', {
+  totalRules: config.forward.length
+});
+
 config.forward.forEach((rule, index) => {
-    // Use 'rule' instead of 'server' for clarity
     if (rule.status === "active") {
         const ruleIdentifier = rule.name ? `${rule.name} (ID: ${rule.id})` : `Rule ID: ${rule.id}`;
-        console.log(`[INFO] Initializing active rule: ${ruleIdentifier}`);
+        logger.info('Initializing active rule', {
+          ruleId: rule.id,
+          ruleName: rule.name,
+          type: rule.type,
+          index
+        });
+        
         if (rule.type === "tcp") {
-            // Pass the entire rule object
             const servers = startTCPServer(rule);
             servers.forEach((server, serverIndex) => {
-                monitor.registerProxy(`tcp_${rule.id}_${serverIndex}`, server);
+                const proxyId = `tcp_${rule.id}_${serverIndex}`;
+                monitor.registerProxy(proxyId, server);
+                if (apiServer) {
+                  apiServer.registerProxy(proxyId, server);
+                }
             });
         } else if (rule.type === "udp") {
-            // Pass the entire rule object
             const servers = startUDPServer(rule);
             servers.forEach((server, serverIndex) => {
-                monitor.registerProxy(`udp_${rule.id}_${serverIndex}`, server);
+                const proxyId = `udp_${rule.id}_${serverIndex}`;
+                monitor.registerProxy(proxyId, server);
+                if (apiServer) {
+                  apiServer.registerProxy(proxyId, server);
+                }
             });
         } else {
-            console.error(`[ERROR] Invalid server type "${rule.type}" for rule ${ruleIdentifier}. Skipping.`);
+            logger.error('Invalid server type', {
+              ruleId: rule.id,
+              ruleName: rule.name,
+              type: rule.type,
+              validTypes: ['tcp', 'udp']
+            });
         }
-    } else if (rule.id) { // Only log if it's a valid rule entry with an ID
-        const ruleIdentifier = rule.name ? `${rule.name} (ID: ${rule.id})` : `Rule ID: ${rule.id}`;
-        console.log(`[INFO] Skipping inactive rule: ${ruleIdentifier}`);
+    } else if (rule.id) {
+        logger.info('Skipping inactive rule', {
+          ruleId: rule.id,
+          ruleName: rule.name,
+          status: rule.status
+        });
     } else {
-        console.warn("[WARN] Skipping entry in config: Missing ID or invalid format.");
+        logger.warn('Skipping invalid config entry', {
+          entry: rule,
+          reason: 'Missing ID or invalid format'
+        });
     }
 });
 
 // Graceful shutdown handling
-process.on('SIGINT', () => {
-    console.log('\n[INFO] Received SIGINT. Shutting down gracefully...');
-    monitor.stop();
-    process.exit(0);
+process.on('SIGINT', async () => {
+    logger.info('Received SIGINT signal, initiating graceful shutdown');
+    try {
+      if (apiServer) {
+        await apiServer.stop();
+      }
+      monitor.stop();
+      logger.info('Graceful shutdown completed');
+      process.exit(0);
+    } catch (error) {
+      logger.error('Error during shutdown', { error: error.message });
+      process.exit(1);
+    }
 });
 
-process.on('SIGTERM', () => {
-    console.log('\n[INFO] Received SIGTERM. Shutting down gracefully...');
-    monitor.stop();
-    process.exit(0);
+process.on('SIGTERM', async () => {
+    logger.info('Received SIGTERM signal, initiating graceful shutdown');
+    try {
+      if (apiServer) {
+        await apiServer.stop();
+      }
+      monitor.stop();
+      logger.info('Graceful shutdown completed');
+      process.exit(0);
+    } catch (error) {
+      logger.error('Error during shutdown', { error: error.message });
+      process.exit(1);
+    }
 });

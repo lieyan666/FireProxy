@@ -10,6 +10,7 @@
  */
 const dgram = require("dgram");
 const net = require("net");
+const { logger } = require('./logger');
 
 class UDPProxy {
   constructor(localHost, localPort, targetHost, targetPort, ruleIdentifier) {
@@ -40,7 +41,14 @@ class UDPProxy {
         this.server.on('error', this.handleServerError.bind(this));
         this.server.on('listening', () => {
           const address = this.server.address();
-          console.log(`[UDP] [${this.ruleIdentifier}] Listening => (${address.family}) ${address.address}:${address.port} -> ${this.targetHost}:${this.targetPort}`);
+          logger.info('UDP proxy server started', {
+            ruleId: this.ruleIdentifier,
+            family: address.family,
+            host: address.address,
+            port: address.port,
+            targetHost: this.targetHost,
+            targetPort: this.targetPort
+          });
           resolve();
         });
 
@@ -69,7 +77,11 @@ class UDPProxy {
     client.lastActivity = Date.now();
     client.targetSocket.send(message, this.targetPort, this.targetHost, (error) => {
       if (error) {
-        console.error(`[UDP] [${this.ruleIdentifier}] Error forwarding message to target: ${error.message}`);
+        logger.proxyError('udp', this.ruleIdentifier, error, {
+          type: 'forward_message',
+          targetHost: this.targetHost,
+          targetPort: this.targetPort
+        });
         this.stats.errors++;
       } else {
         this.stats.messagesForwarded++;
@@ -93,14 +105,22 @@ class UDPProxy {
     targetSocket.on('message', (message) => {
       this.server.send(message, clientInfo.port, clientInfo.address, (error) => {
         if (error) {
-          console.error(`[UDP] [${this.ruleIdentifier}] Error sending response to client: ${error.message}`);
+          logger.proxyError('udp', this.ruleIdentifier, error, {
+            type: 'response_to_client',
+            clientAddress: clientInfo.address,
+            clientPort: clientInfo.port
+          });
           this.stats.errors++;
         }
       });
     });
 
     targetSocket.on('error', (error) => {
-      console.error(`[UDP] [${this.ruleIdentifier}] Client socket error: ${error.message}`);
+      logger.proxyError('udp', this.ruleIdentifier, error, {
+        type: 'client_socket',
+        clientAddress: clientInfo.address,
+        clientPort: clientInfo.port
+      });
       this.stats.errors++;
       this.removeClient(clientInfo);
     });
@@ -114,7 +134,10 @@ class UDPProxy {
     if (client) {
       client.targetSocket.close();
       this.clients.delete(clientKey);
-      console.log(`[UDP] [${this.ruleIdentifier}] Disconnecting socket from ${clientInfo.address}:${clientInfo.port}`);
+      logger.proxyDisconnection('udp', this.ruleIdentifier, {
+        address: clientInfo.address,
+        port: clientInfo.port
+      }, 'cleanup');
     }
   }
 
@@ -128,7 +151,9 @@ class UDPProxy {
   }
 
   handleServerError(error) {
-    console.error(`[UDP] [${this.ruleIdentifier}] Server error: ${error.message}`);
+    logger.proxyError('udp', this.ruleIdentifier, error, {
+      type: 'server_error'
+    });
     this.stats.errors++;
   }
 
@@ -168,12 +193,20 @@ function startUDPServer(rule) {
         !Array.isArray(rule.targetPortRange) || rule.targetPortRange.length !== 2 ||
         localStart > localEnd || targetStart > targetEnd ||
         (localEnd - localStart) !== (targetEnd - targetStart)) {
-      console.error(`[UDP] Invalid port range configuration for ${ruleIdentifier}. Check ranges.`);
+      logger.error('UDP invalid port range configuration', {
+        ruleId: rule.id,
+        localPortRange: rule.localPortRange,
+        targetPortRange: rule.targetPortRange
+      });
       return [];
     }
 
     const servers = [];
-    console.log(`[UDP] Setting up port range for ${ruleIdentifier}: Local ${localStart}-${localEnd} -> Target ${targetStart}-${targetEnd}`);
+    logger.info('UDP port range setup started', {
+      ruleId: rule.id,
+      localRange: [localStart, localEnd],
+      targetRange: [targetStart, targetEnd]
+    });
 
     for (let i = 0; i <= localEnd - localStart; i++) {
       const currentLocalPort = localStart + i;
@@ -182,13 +215,31 @@ function startUDPServer(rule) {
       try {
         const proxy = new UDPProxy(localHost, currentLocalPort, targetHost, currentTargetPort, ruleIdentifier);
         proxy.start().then(() => {
-          console.log(`[UDP] [${ruleIdentifier}] Successfully started proxy for ${localHost}:${currentLocalPort} -> ${targetHost}:${currentTargetPort}`);
+          logger.info('UDP proxy started successfully', {
+            ruleId: rule.id,
+            localHost,
+            localPort: currentLocalPort,
+            targetHost,
+            targetPort: currentTargetPort
+          });
         }).catch(error => {
-          console.error(`[UDP] [${ruleIdentifier}] Failed to start proxy for ${localHost}:${currentLocalPort}: ${error.message}`);
+          logger.error('UDP proxy start failed', {
+            ruleId: rule.id,
+            localHost,
+            localPort: currentLocalPort,
+            error: error.message
+          });
         });
         servers.push(proxy);
       } catch (err) {
-        console.error(`[UDP] [${ruleIdentifier}] Failed to create proxy for ${localHost}:${currentLocalPort} -> ${targetHost}:${currentTargetPort}: ${err.message}`);
+        logger.error('UDP proxy creation failed', {
+          ruleId: rule.id,
+          localHost,
+          localPort: currentLocalPort,
+          targetHost,
+          targetPort: currentTargetPort,
+          error: err.message
+        });
       }
     }
     return servers;
@@ -200,17 +251,38 @@ function startUDPServer(rule) {
     try {
       const proxy = new UDPProxy(localHost, localPort, targetHost, targetPort, ruleIdentifier);
       proxy.start().then(() => {
-        console.log(`[UDP] [${ruleIdentifier}] Successfully started proxy`);
+        logger.info('UDP proxy started successfully', {
+          ruleId: rule.id,
+          localHost,
+          localPort,
+          targetHost,
+          targetPort
+        });
       }).catch(error => {
-        console.error(`[UDP] [${ruleIdentifier}] Failed to start proxy: ${error.message}`);
+        logger.error('UDP proxy start failed', {
+          ruleId: rule.id,
+          localHost,
+          localPort,
+          error: error.message
+        });
       });
       return [proxy];
     } catch (err) {
-      console.error(`[UDP] [${ruleIdentifier}] Failed to create proxy for ${localHost}:${localPort} -> ${targetHost}:${targetPort}: ${err.message}`);
+      logger.error('UDP proxy creation failed', {
+        ruleId: rule.id,
+        localHost,
+        localPort,
+        targetHost,
+        targetPort,
+        error: err.message
+      });
       return [];
     }
   } else {
-    console.error(`[UDP] Invalid configuration for ${ruleIdentifier}. Missing localPort/targetPort or localPortRange/targetPortRange.`);
+    logger.error('UDP invalid configuration', {
+      ruleId: rule.id,
+      reason: 'Missing localPort/targetPort or localPortRange/targetPortRange'
+    });
     return [];
   }
 }

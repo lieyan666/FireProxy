@@ -10,6 +10,7 @@
  */
 const net = require("net");
 const { EventEmitter } = require('events');
+const { logger } = require('./logger');
 
 class DynamicConnectionPool extends EventEmitter {
   constructor(targetHost, targetPort, options = {}) {
@@ -63,7 +64,11 @@ class DynamicConnectionPool extends EventEmitter {
     if (this.prewarmingInProgress) return;
     this.prewarmingInProgress = true;
     
-    console.log(`[TCP Pool] Prewarming ${this.initialPoolSize} connections to ${this.targetHost}:${this.targetPort}`);
+    logger.info('TCP pool prewarming started', {
+      targetHost: this.targetHost,
+      targetPort: this.targetPort,
+      initialPoolSize: this.initialPoolSize
+    });
     
     const promises = [];
     for (let i = 0; i < this.initialPoolSize; i++) {
@@ -72,7 +77,11 @@ class DynamicConnectionPool extends EventEmitter {
     
     await Promise.allSettled(promises);
     this.prewarmingInProgress = false;
-    console.log(`[TCP Pool] Prewarmed ${this.pool.length} connections`);
+    logger.info('TCP pool prewarming completed', {
+      connectionCount: this.pool.length,
+      targetHost: this.targetHost,
+      targetPort: this.targetPort
+    });
   }
   
   // Dynamic scaling based on load
@@ -100,7 +109,11 @@ class DynamicConnectionPool extends EventEmitter {
     const currentSize = this.pool.length;
     const targetIncrease = Math.min(this.scaleUpStep, this.maxPoolSize - currentSize);
     
-    console.log(`[TCP Pool] Scaling UP: Adding ${targetIncrease} connections (current: ${currentSize})`);
+    logger.debug('TCP pool scaling up', {
+      currentSize,
+      targetIncrease,
+      maxPoolSize: this.maxPoolSize
+    });
     
     const promises = [];
     for (let i = 0; i < targetIncrease; i++) {
@@ -119,7 +132,11 @@ class DynamicConnectionPool extends EventEmitter {
     const currentSize = this.pool.length;
     const targetDecrease = Math.min(this.scaleDownStep, currentSize - this.minPoolSize);
     
-    console.log(`[TCP Pool] Scaling DOWN: Removing ${targetDecrease} connections (current: ${currentSize})`);
+    logger.debug('TCP pool scaling down', {
+      currentSize,
+      targetDecrease,
+      minPoolSize: this.minPoolSize
+    });
     
     // Remove idle connections first
     let removed = 0;
@@ -312,7 +329,10 @@ class DynamicConnectionPool extends EventEmitter {
     this.stats.waitingRequests = this.waitingQueue.length;
     
     if (cleaned > 0 || expiredRequests.length > 0) {
-      console.log(`[TCP Pool] Cleanup: Removed ${cleaned} idle connections, ${expiredRequests.length} expired requests`);
+      logger.debug('TCP pool cleanup completed', {
+        cleanedConnections: cleaned,
+        expiredRequests: expiredRequests.length
+      });
     }
   }
   
@@ -410,14 +430,22 @@ function startTCPServer(rule) {
         !Array.isArray(rule.targetPortRange) || rule.targetPortRange.length !== 2 ||
         localStart > localEnd || targetStart > targetEnd ||
         (localEnd - localStart) !== (targetEnd - targetStart)) {
-      console.error(`[TCP] Invalid port range configuration for ${ruleIdentifier}. Check ranges.`);
+      logger.error('TCP invalid port range configuration', {
+        ruleId: rule.id,
+        localPortRange: rule.localPortRange,
+        targetPortRange: rule.targetPortRange
+      });
       return []; // Return empty array indicating failure for this rule
     }
 
     const servers = [];
     const pools = {}; // Map to hold connection pools, keyed by targetPort
 
-    console.log(`[TCP] Setting up port range for ${ruleIdentifier}: Local ${localStart}-${localEnd} -> Target ${targetStart}-${targetEnd}`);
+    logger.info('TCP port range setup started', {
+      ruleId: rule.id,
+      localRange: [localStart, localEnd],
+      targetRange: [targetStart, targetEnd]
+    });
 
     for (let i = 0; i <= localEnd - localStart; i++) {
       const currentLocalPort = localStart + i;
@@ -432,7 +460,13 @@ function startTCPServer(rule) {
           scaleUpThreshold: 0.75,
           scaleDownThreshold: 0.25
         });
-        console.log(`[TCP] Initialized dynamic connection pool for ${targetHost}:${currentTargetPort} (Rule: ${ruleIdentifier})`);
+        logger.info('TCP dynamic connection pool initialized', {
+          targetHost,
+          targetPort: currentTargetPort,
+          ruleId: rule.id,
+          minPoolSize: 3,
+          maxPoolSize: 30
+        });
       }
       const pool = pools[currentTargetPort];
 
@@ -447,19 +481,32 @@ function startTCPServer(rule) {
           
           const tcpTargetSocket = await pool.getConnection();
           if (!tcpTargetSocket) {
-            console.warn(`[TCP] [${ruleIdentifier}] Failed to get connection from pool for ${currentLocalPort}`);
+            logger.warn('TCP failed to get connection from pool', {
+              ruleId: rule.id,
+              localPort: currentLocalPort
+            });
             tcpLocalSocket.destroy();
             return;
           }
 
-          console.log(
-            `[TCP] [${ruleIdentifier}] Proxying ${tcpLocalSocket.remoteAddress}:${tcpLocalSocket.remotePort} via ${localHost}:${currentLocalPort} <=> ${targetHost}:${currentTargetPort} ` +
-            `(Pool: ${pool.stats.activeConnections}/${pool.pool.length})`
-          );
+          logger.proxyConnection('tcp', rule.id, {
+            address: tcpLocalSocket.remoteAddress,
+            port: tcpLocalSocket.remotePort
+          }, {
+            address: targetHost,
+            port: currentTargetPort
+          }, {
+            localPort: currentLocalPort,
+            poolActive: pool.stats.activeConnections,
+            poolTotal: pool.pool.length
+          });
 
           // Use zero-copy proxy for maximum performance
           const { cleanup } = ZeroCopyProxy.setupPipe(tcpLocalSocket, tcpTargetSocket, (direction, error) => {
-            console.error(`[TCP] [${ruleIdentifier}] Pipe error (${direction}) on ${currentLocalPort}: ${error.message}`);
+            logger.proxyError('tcp', rule.id, error, {
+              direction,
+              localPort: currentLocalPort
+            });
             pool.releaseConnection(tcpTargetSocket);
             tcpTargetSocket.destroy();
             tcpLocalSocket.destroy();
@@ -467,9 +514,10 @@ function startTCPServer(rule) {
 
           tcpLocalSocket.on('close', () => {
             pool.releaseConnection(tcpTargetSocket);
-            console.log(
-              `[TCP] [${ruleIdentifier}] Disconnecting socks from ${tcpLocalSocket.remoteAddress}:${tcpLocalSocket.remotePort} (Local: ${currentLocalPort})`
-            );
+            logger.proxyDisconnection('tcp', rule.id, {
+              address: tcpLocalSocket.remoteAddress,
+              port: tcpLocalSocket.remotePort
+            }, 'normal');
           });
 
           tcpTargetSocket.on('close', () => {
@@ -478,31 +526,58 @@ function startTCPServer(rule) {
           });
 
           tcpLocalSocket.on('error', (error) => {
-            console.error(`[TCP] [${ruleIdentifier}] Local socket error (${tcpLocalSocket.remoteAddress}:${tcpLocalSocket.remotePort} on ${currentLocalPort}): ${error.message}`);
+            logger.proxyError('tcp', rule.id, error, {
+            type: 'local_socket',
+            clientAddress: tcpLocalSocket.remoteAddress,
+            clientPort: tcpLocalSocket.remotePort,
+            localPort: currentLocalPort
+          });
             cleanup();
             pool.releaseConnection(tcpTargetSocket);
             tcpTargetSocket.destroy();
           });
 
           tcpTargetSocket.on('error', (error) => {
-            console.error(`[TCP] [${ruleIdentifier}] Target socket error (${targetHost}:${currentTargetPort}): ${error.message}`);
+            logger.proxyError('tcp', rule.id, error, {
+            type: 'target_socket',
+            targetHost,
+            targetPort: currentTargetPort
+          });
             cleanup();
             pool.releaseConnection(tcpTargetSocket);
             tcpLocalSocket.destroy();
           });
         } catch (err) {
-          console.error(`[TCP] [${ruleIdentifier}] Failed to establish connection for ${localHost}:${currentLocalPort} -> ${targetHost}:${currentTargetPort}: ${err.message}`);
+          logger.error('TCP failed to establish connection', {
+          ruleId: rule.id,
+          localHost,
+          localPort: currentLocalPort,
+          targetHost,
+          targetPort: currentTargetPort,
+          error: err.message
+        });
           tcpLocalSocket.destroy();
         }
       });
 
       tcpServer.listen(currentLocalPort, localHost, () => {
-        console.log(`[TCP] [${ruleIdentifier}] Listening => ${localHost}:${currentLocalPort} -> ${targetHost}:${currentTargetPort}`);
-        // console.log(`[TCP] Connection pool size for ${currentTargetPort}: ${pool.poolSize}`); // Log pool size if needed
+        logger.info('TCP proxy server started', {
+          ruleId: rule.id,
+          localHost,
+          localPort: currentLocalPort,
+          targetHost,
+          targetPort: currentTargetPort,
+          type: 'port_range'
+        });
       });
 
       tcpServer.on('error', (error) => {
-        console.error(`[TCP] [${ruleIdentifier}] Server error on ${localHost}:${currentLocalPort}: ${error.message}`);
+        logger.error('TCP server error', {
+          ruleId: rule.id,
+          localHost,
+          localPort: currentLocalPort,
+          error: error.message
+        });
       });
 
       servers.push(tcpServer);
@@ -526,15 +601,25 @@ function startTCPServer(rule) {
         
         const tcpTargetSocket = await pool.getConnection();
         if (!tcpTargetSocket) {
-          console.warn(`[TCP] [${ruleIdentifier}] Failed to get connection from pool for ${localPort}`);
+          logger.warn('TCP failed to get connection from pool', {
+            ruleId: rule.id,
+            localPort
+          });
           tcpLocalSocket.destroy();
           return;
         }
 
-        console.log(
-          `[TCP] [${ruleIdentifier}] Proxying ${tcpLocalSocket.remoteAddress}:${tcpLocalSocket.remotePort} via ${localHost}:${localPort} <=> ${targetHost}:${targetPort} ` +
-          `(Pool: ${pool.stats.activeConnections}/${pool.pool.length})`
-        );
+        logger.proxyConnection('tcp', rule.id, {
+          address: tcpLocalSocket.remoteAddress,
+          port: tcpLocalSocket.remotePort
+        }, {
+          address: targetHost,
+          port: targetPort
+        }, {
+          localPort,
+          poolActive: pool.stats.activeConnections,
+          poolTotal: pool.pool.length
+        });
 
         // Use zero-copy proxy for maximum performance
         const { cleanup } = ZeroCopyProxy.setupPipe(tcpLocalSocket, tcpTargetSocket, (direction, error) => {
@@ -576,17 +661,35 @@ function startTCPServer(rule) {
     });
 
     tcpServer.listen(localPort, localHost, () => {
-      console.log(`[TCP] [${ruleIdentifier}] Listening => ${localHost}:${localPort} -> ${targetHost}:${targetPort}`);
-      console.log(`[TCP] [${ruleIdentifier}] Dynamic connection pool: ${pool.minPoolSize}-${pool.maxPoolSize} connections`);
+      logger.info('TCP proxy server started', {
+        ruleId: rule.id,
+        localHost,
+        localPort,
+        targetHost,
+        targetPort,
+        type: 'single_port',
+        poolConfig: {
+          min: pool.minPoolSize,
+          max: pool.maxPoolSize
+        }
+      });
     });
 
     tcpServer.on('error', (error) => {
-      console.error(`[TCP] [${ruleIdentifier}] Server error on ${localHost}:${localPort}: ${error.message}`);
+      logger.error('TCP server error', {
+        ruleId: rule.id,
+        localHost,
+        localPort,
+        error: error.message
+      });
     });
 
     return [tcpServer]; // Return array containing the single server instance for consistency
   } else {
-    console.error(`[TCP] Invalid configuration for ${ruleIdentifier}. Missing localPort/targetPort or localPortRange/targetPortRange.`);
+    logger.error('TCP invalid configuration', {
+      ruleId: rule.id,
+      reason: 'Missing localPort/targetPort or localPortRange/targetPortRange'
+    });
     return []; // Return empty array for invalid config
   }
 }

@@ -8,6 +8,7 @@
 
 const os = require('os');
 const process = require('process');
+const { logger } = require('./logger');
 
 class PerformanceMonitor {
   constructor() {
@@ -39,7 +40,10 @@ class PerformanceMonitor {
   }
 
   start() {
-    console.log('[Performance] Starting performance monitoring...');
+    logger.info('Performance monitoring started', {
+      reportInterval: this.reportInterval / 1000 + 's',
+      updateInterval: '30s'
+    });
     
     this.monitoringInterval = setInterval(() => {
       this.updateSystemStats();
@@ -60,7 +64,7 @@ class PerformanceMonitor {
     if (this.reportingInterval) {
       clearInterval(this.reportingInterval);
     }
-    console.log('[Performance] Performance monitoring stopped');
+    logger.info('Performance monitoring stopped');
   }
 
   registerProxy(proxyId, proxyInstance) {
@@ -115,6 +119,31 @@ class PerformanceMonitor {
     const hours = Math.floor(uptime / 3600);
     const minutes = Math.floor((uptime % 3600) / 60);
     
+    logger.performanceMetrics({
+      uptime: {
+        total: uptime,
+        hours,
+        minutes,
+        formatted: `${hours}h ${minutes}m`
+      },
+      system: {
+        memoryUsagePercent: Number(stats.system.memoryUsage.toFixed(1)),
+        totalMemoryGB: Number((stats.system.totalMemory / 1024 / 1024 / 1024).toFixed(1)),
+        loadAverage: stats.system.loadAverage.map(l => Number(l.toFixed(2)))
+      },
+      process: {
+        memoryRssMB: Number((stats.process.memoryUsage.rss / 1024 / 1024).toFixed(1)),
+        memoryHeapMB: Number((stats.process.memoryUsage.heapUsed / 1024 / 1024).toFixed(1))
+      },
+      proxy: {
+        totalConnections: stats.proxy.totalConnections,
+        activeConnections: stats.proxy.activeConnections,
+        totalErrors: stats.proxy.totalErrors,
+        activeInstances: this.proxyInstances.size
+      }
+    });
+    
+    // Still log to console for easy monitoring in production
     console.log('\n================================ Performance Summary ================================');
     console.log(`[Performance] Uptime: ${hours}h ${minutes}m`);
     console.log(`[Performance] System Memory: ${stats.system.memoryUsage.toFixed(1)}% (${(stats.system.totalMemory / 1024 / 1024 / 1024).toFixed(1)}GB total)`);
